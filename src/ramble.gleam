@@ -91,15 +91,19 @@ pub fn get_errors(res: ParseResult(t, a)) -> List(ParseError(t)) {
   }
 }
 
-pub fn label(label: String, p: fn() -> Parser(t, a)) -> Parser(t, a) {
+pub fn label(l: String, p: fn() -> Parser(t, a)) -> Parser(t, a) {
   Parser(fn(source, pos, config, recovery) {
+    io.println(l)
     let res = p().parse(source, pos, config, recovery)
     case res.value {
-      Ok(_) -> res
+      Ok(_) -> {
+        res
+      }
       Error(e) -> {
         let e = case e {
-          Unexpected(pos, t, _) -> Unexpected(pos, t, [LabeledToken(label)])
+          Unexpected(pos, t, _) -> Unexpected(pos, t, [LabeledToken(l)])
         }
+        io.debug(res.rest)
         ParseResult(Error(e), res.rest, res.new_pos, res.errors)
       }
     }
@@ -107,18 +111,13 @@ pub fn label(label: String, p: fn() -> Parser(t, a)) -> Parser(t, a) {
 }
 
 pub fn consume_and_discard_until(p: Parser(t, t)) -> Parser(t, Nil) {
-  Parser(fn(source, pos, config, recovery) {
-    let res = p.parse(source, pos, config, recovery)
+  Parser(fn(source, pos, config, _recovery) {
+    let res = p.parse(source, pos, config, None)
     case res.value {
       Ok(_) ->
         ParseResult(value: Ok(Nil), rest: source, new_pos: pos, errors: [])
       Error(_) ->
-        consume_and_discard_until(p).parse(
-          res.rest,
-          res.new_pos,
-          config,
-          recovery,
-        )
+        consume_and_discard_until(p).parse(res.rest, res.new_pos, config, None)
     }
   })
 }
@@ -146,7 +145,7 @@ pub fn any_token() -> Parser(t, t) {
         ParseResult(value: Ok(head), rest: tail, new_pos: new_pos, errors: [])
       }
       [] -> {
-        let err = Unexpected(pos, Token(config.eof), [])
+        let err = Unexpected(pos, Token(config.eof), [LabeledToken("anything")])
         ParseResult(value: Error(err), rest: source, new_pos: pos, errors: [])
       }
     }
@@ -156,13 +155,10 @@ pub fn any_token() -> Parser(t, t) {
 pub fn recover() -> Parser(t, Nil) {
   Parser(fn(source, pos, config, recovery) {
     let p = case recovery {
-      Some(r) -> {
-        consume_and_discard_until(r)
-      }
-      None -> {
+      Some(r) -> consume_and_discard_until(r)
+      None ->
         any_token()
         |> map(fn(_) { Nil })
-      }
     }
     let res = p.parse(source, pos, config, None)
     ParseResult(Ok(Nil), res.rest, res.new_pos, [])
@@ -190,8 +186,9 @@ pub fn satisfy(when pred: fn(t) -> Bool) -> Parser(t, t) {
           }
         }
       [] -> {
+        panic
         let err = Unexpected(pos, Token(config.eof), [])
-        ParseResult(value: Error(err), rest: source, new_pos: pos, errors: [])
+        ParseResult(value: Error(err), rest: [], new_pos: pos, errors: [])
       }
     }
   })
@@ -206,10 +203,40 @@ pub fn token(t: t) -> Parser(t, t) {
 
 pub fn extract(p: Parser(t, a), k: fn(a) -> Parser(t, b)) -> Parser(t, b) {
   Parser(fn(source, pos, config, recovery) {
-    let res = p.parse(source, pos, config, recovery)
-    case res.value {
-      Ok(v) -> k(v).parse(res.rest, res.new_pos, config, recovery)
-      Error(e) -> ParseResult(Error(e), res.rest, res.new_pos, res.errors)
+    let res1 = p.parse(source, pos, config, recovery)
+    case res1.value {
+      Ok(v) -> {
+        let res2 = k(v).parse(res1.rest, res1.new_pos, config, recovery)
+        ParseResult(
+          res2.value,
+          res2.rest,
+          res2.new_pos,
+          list.append(get_errors(res1), res2.errors),
+        )
+      }
+      Error(e) -> ParseResult(Error(e), res1.rest, res1.new_pos, res1.errors)
+    }
+  })
+}
+
+pub fn do(p: Parser(t, a), k: fn() -> Parser(t, b)) -> Parser(t, b) {
+  seq(p, k())
+}
+
+pub fn try(p: Parser(t, a), k: fn() -> Parser(t, b)) -> Parser(t, b) {
+  Parser(fn(source, pos, config, recovery) {
+    let res1 = p.parse(source, pos, config, recovery)
+    case res1.value {
+      Ok(_) -> {
+        let res2 = k().parse(res1.rest, res1.new_pos, config, recovery)
+        ParseResult(
+          value: res2.value,
+          rest: res2.rest,
+          new_pos: res2.new_pos,
+          errors: list.append(get_errors(res1), res2.errors),
+        )
+      }
+      Error(e) -> ParseResult(Error(e), res1.rest, res1.new_pos, res1.errors)
     }
   })
 }
@@ -229,7 +256,10 @@ pub fn seq(p1: Parser(t, a), p2: Parser(t, b)) -> Parser(t, b) {
   })
 }
 
-pub fn do_and_recover(p: Parser(t, a), recovery: Parser(t, t)) -> Parser(t, a) {
+pub fn do_and_recover(
+  p: Parser(t, a),
+  recovery recovery: Parser(t, t),
+) -> Parser(t, a) {
   Parser(fn(source, pos, config, _recovery) {
     p.parse(source, pos, config, Some(recovery))
   })
@@ -298,6 +328,10 @@ pub fn digit() -> Parser(String, String) {
   char_in_range(0x30, 0x3a)
 }
 
+pub fn alphanum() -> Parser(String, String) {
+  either(letter(), digit())
+}
+
 /// Parse with the first parser in the list that doesn't fail.
 pub fn choice(ps: List(Parser(t, a))) -> Parser(t, a) {
   Parser(fn(source, pos, config, recovery) {
@@ -326,7 +360,7 @@ fn choice_helper(
           Error(e) -> {
             let expectations = list.append(expected, e.expected)
             let err = Unexpected(e.pos, e.token, expectations)
-            ParseResult(Error(err), source, pos, [])
+            ParseResult(Error(err), res.rest, res.new_pos, [])
           }
         }
       }
@@ -334,7 +368,12 @@ fn choice_helper(
         let res = p.parse(source, pos, config, recovery)
         case res.value {
           Ok(v) ->
-            ParseResult(value: Ok(v), rest: source, new_pos: pos, errors: [])
+            ParseResult(
+              value: Ok(v),
+              rest: res.rest,
+              new_pos: res.new_pos,
+              errors: res.errors,
+            )
           Error(e) ->
             choice_helper(t, list.append(e.expected, expected)).parse(
               source,
@@ -364,6 +403,188 @@ pub fn exact(s: String) -> Parser(String, String) {
     }
     Error(_) -> return("")
   }
+}
+
+/// Keep trying the parser until it fails, and return the array of parsed results.
+/// This cannot fail because it parses zero or more times!
+pub fn many(p: Parser(t, a)) -> Parser(t, List(a)) {
+  Parser(fn(source, pos, config, recovery) {
+    let res = p.parse(source, pos, config, recovery)
+    case res.value {
+      Error(_) -> {
+        io.println("recovering in `many`")
+        let recovery_parser = case recovery {
+          Some(r) -> r
+          None -> any_token()
+        }
+        let res2 = recovery_parser.parse(res.rest, res.new_pos, config, recovery)
+        case res2.value {
+          Ok(_) ->
+            ParseResult(
+              value: io.debug(Ok([])),
+              rest: source,
+              new_pos: pos,
+              errors: res.errors,
+            )
+          Error(_) -> {
+            io.debug("recovery in `many` failed, continuing")
+            let res3 = many(p).parse(res2.rest, res2.new_pos, config, recovery)
+            case res3.value {
+              Error(_) ->
+                ParseResult(
+                  value: Ok([]),
+                  rest: source,
+                  new_pos: pos,
+                  errors: list.append(get_errors(res), res3.errors),
+                )
+              Ok(vs) -> {
+                ParseResult(
+                  value: Ok(vs),
+                  rest: res3.rest,
+                  new_pos: res3.new_pos,
+                  errors: list.append(get_errors(res), res3.errors),
+                )
+              }
+            }
+          }
+        }
+        
+      }
+      Ok(v) -> {
+        let res2 = many(p).parse(res.rest, res.new_pos, config, recovery)
+        case res2.value {
+          Error(_) ->
+            ParseResult(
+              value: Ok([]),
+              rest: source,
+              new_pos: pos,
+              errors: list.append(res.errors, res2.errors),
+            )
+          Ok(vs) -> {
+            ParseResult(
+              value: Ok([v, ..vs]),
+              rest: res2.rest,
+              new_pos: res2.new_pos,
+              errors: list.append(res.errors, res2.errors),
+            )
+          }
+        }
+      }
+    }
+  })
+}
+
+/// Parse a certain string as many times as possible, returning everything that was parsed.
+/// This cannot fail because it parses zero or more times!
+pub fn many_as_string(p: Parser(t, String)) -> Parser(t, String) {
+  many(p)
+  |> map(string.concat)
+}
+
+/// Keep trying the parser until it fails, and return the array of parsed results.
+/// This can fail, because it must parse successfully at least once!
+pub fn many1(p: Parser(t, a)) -> Parser(t, List(a)) {
+  Parser(fn(source, pos, config, recovery) {
+    let res = p.parse(source, pos, config, recovery)
+    case res.value {
+      Error(e) ->
+        ParseResult(
+          value: Error(e),
+          rest: source,
+          new_pos: pos,
+          errors: res.errors,
+        )
+      Ok(v) -> {
+        let res2 = many(p).parse(res.rest, res.new_pos, config, recovery)
+        case res2.value {
+          Error(_) ->
+            ParseResult(
+              value: Ok([v]),
+              rest: res.rest,
+              new_pos: res.new_pos,
+              errors: res.errors,
+            )
+          Ok(vs) ->
+            ParseResult(
+              value: Ok([v, ..vs]),
+              rest: res2.rest,
+              new_pos: res2.new_pos,
+              errors: list.append(res.errors, res2.errors),
+            )
+        }
+      }
+    }
+  })
+}
+
+/// Parse a certain string as many times as possible, returning everything that was parsed.
+/// This can fail, because it must parse successfully at least once!
+pub fn many1_as_string(p: Parser(t, String)) -> Parser(t, String) {
+  many1(p)
+  |> map(string.concat)
+}
+
+const whitespace_chars = " \t\n"
+
+/// Parse zero or more whitespace characters.
+pub fn whitespace() -> Parser(String, String) {
+  use <- label("whitespace")
+  many_as_string(satisfy(when: string.contains(whitespace_chars, _)))
+}
+
+/// Parse one or more whitespace characters.
+pub fn whitespace1() -> Parser(String, String) {
+  use <- label("whitespace")
+  many1_as_string(satisfy(when: string.contains(whitespace_chars, _)))
+}
+
+/// Try running a parser, but still succeed (with `Error(Nil)`) if it failed.
+pub fn optional(p: Parser(t, a)) -> Parser(t, Result(a, Nil)) {
+  Parser(fn(source, pos, config, recovery) {
+    let res = p.parse(source, pos, config, recovery)
+    case res.value {
+      Ok(v) ->
+        ParseResult(
+          value: Ok(Ok(v)),
+          rest: res.rest,
+          new_pos: res.new_pos,
+          errors: res.errors,
+        )
+      Error(_) ->
+        ParseResult(
+          value: Ok(Error(Nil)),
+          rest: source,
+          new_pos: pos,
+          errors: res.errors,
+        )
+    }
+  })
+}
+
+/// Parse a sequence separated by the given separator parser.
+pub fn sep(parser: Parser(t, a), by s: Parser(t, b)) -> Parser(t, List(a)) {
+  use res <- extract(optional(sep1(parser, by: s)))
+  case res {
+    Ok(sequence) -> return(sequence)
+    Error(Nil) -> return([])
+  }
+}
+
+/// Parse a sequence separated by the given separator parser.
+/// This only succeeds if at least one element of the sequence was parsed.
+pub fn sep1(parser: Parser(t, a), by s: Parser(t, b)) -> Parser(t, List(a)) {
+  use first <- extract(parser)
+  use rest <- extract(many(seq(s, parser)))
+  return([first, ..rest])
+}
+
+// Run a parser as normal, but the parser itself isn't evaluated until it is used.
+/// This is needed for recursive grammars, such as `E := n | E + E` where `n` is a number.
+/// Example: `lazy(digit)` instead of `digit()`.
+pub fn lazy(p: fn() -> Parser(t, a)) -> Parser(t, a) {
+  Parser(fn(source, pos, config, recovery) {
+    p().parse(source, pos, config, recovery)
+  })
 }
 
 /// This grants full control over parsing by allowing a custom parse function.
@@ -423,6 +644,53 @@ fn pretty_err(
   }
 }
 
+type P =
+  Parser(String, String)
+
+fn ident() -> P {
+  use <- label("an identifier")
+  use first <- extract(lowercase_letter())
+  use rest <- extract(many_as_string(either(alphanum(), token("_"))))
+  return(first <> rest)
+}
+
+fn int() -> P {
+  use <- label("an integer")
+  many1_as_string(digit())
+}
+
+fn array() -> P {
+  use <- label("an array")
+  use <- try(token("["))
+  use elements <- extract(do_and_recover(
+    sep(
+      do_and_recover(lazy(expr), recovery: either(token(","), token("]"))),
+      by: token(","),
+    ),
+    recovery: token("]"),
+  ))
+  use <- do(token("]"))
+  return("[" <> string.join(elements, ",") <> "]")
+}
+
+fn binding() -> P {
+  use <- label("a let-binding")
+  use <- try(seq(exact("let"), whitespace1()))
+  use ident <- extract(ident())
+  use <- do(whitespace())
+  use <- do(token("="))
+  use val <- extract(lazy(expr))
+  return("let " <> ident <> " = " <> val)
+}
+
+fn expr() -> P {
+  use <- label("an expression")
+  use <- do(whitespace())
+  use e <- extract(choice([int(), array(), binding(), ident()]))
+  use <- do(whitespace())
+  return(e)
+}
+
 pub fn main() {
   let config =
     ParserConfig(
@@ -431,40 +699,8 @@ pub fn main() {
       source_name: "DEBUG",
       token_to_string: fn(s) { s },
     )
-  let p =
-    seq(
-      do_and_recover(exact("def"), token(";")),
-      seq(
-        token(";"),
-        seq(
-          choice([
-            uppercase_letter(),
-            an_token("a"),
-            either(digit(), an_token("r")),
-          ]),
-          token("d"),
-        ),
-      ),
-    )
-  io.println(
-    "
-Parser code:
-seq(
-  do_and_recover(exact(\"def\"), token(\";\")),
-  seq(
-    token(\";\"),
-    seq(
-      choice([
-        uppercase_letter(),
-        an_token(\"a\"),
-        either(digit(), an_token(\"r\")),
-      ]),
-      token(\"d\"),
-    ),
-  ),
-)",
-  )
-  let code = "ab;cd"
+  let p = expr()
+  let code = "let x = [1+2, 3]"
   io.println("Parsing: " <> code)
   let FinalParseResult(v, errs) = go(p, code, config)
   let errs = case v {
